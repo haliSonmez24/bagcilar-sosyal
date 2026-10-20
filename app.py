@@ -1,15 +1,18 @@
 from flask import Flask, render_template_string, request
 import requests
 import re
+import os
+import pytesseract
+from PIL import Image
 
 app = Flask(__name__)
 
-# Google Apps Script Web App URL'in (Aynı kalacak)
+# Google Apps Script Web App URL'in
 GOOGLE_SCRIPT_URL = "BURAYA_GOOGLE_APPS_SCRIPT_URL_ADRESINI_YAPISTIR"
 
-def evaluate_and_calculate(data):
+def evaluate_and_calculate(data, rapor_metni):
     ad_soyad = data.get('ad_soyad', 'Belirtilmemiş')
-    rapor_metni = str(data.get('rapor_metni', '')).lower()
+    rapor_metni = str(rapor_metni).lower()
     
     try:
         kisi_sayisi = int(data.get('kisi_sayisi', 3))
@@ -51,11 +54,11 @@ def evaluate_and_calculate(data):
         if any(fw in sent for fw in forbidden_words):
             continue
 
-        # Eğer bu cümle bir kira cümlesiyse, gelir hesabına katma!
+        # Kira cümlesiyse gelir hesabına katma!
         if 'kira' in sent:
             continue
 
-        # Sabit Yardımlar (Senin belirttiğin tutarlar)
+        # Sabit Yardımlar ve Maaşlar
         if 'asgari ücret' in sent:
             total_income += 28075.0
         if 'yaşlılık' in sent or 'yaşlı aylığı' in sent:
@@ -71,7 +74,7 @@ def evaluate_and_calculate(data):
         elif 'engelli' in sent:
             total_income += 7250.0
         if 'evde bakım' in sent or 'evde bakım aylığı' in sent:
-            total_income += 7250.0 # İhtiyaca göre güncellenebilir
+            total_income += 7250.0
         if 'sed' in sent:
             total_income += 11000.0
 
@@ -155,7 +158,7 @@ HTML_TEMPLATE = """
     <nav class="navbar navbar-custom py-3 px-4 shadow-sm">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1 fw-bold text-info">🏛️ BAĞCILAR BELEDİYESİ</span>
-            <span class="text-white-50 small">Mobil Saha Sistemi v5.5</span>
+            <span class="text-white-50 small">Mobil Saha Sistemi v6.0 (OCR Destekli)</span>
         </div>
     </nav>
 
@@ -163,8 +166,8 @@ HTML_TEMPLATE = """
         <div class="row justify-content-center">
             <div class="col-md-8">
                 <div class="card card-custom p-4 mb-4 bg-white">
-                    <h5 class="fw-bold text-primary mb-3">📋 Sosyal İnceleme & Değerlendirme</h5>
-                    <form method="POST">
+                    <h5 class="fw-bold text-primary mb-3">📋 Sosyal İnceleme & Kamera / Belge Analizi</h5>
+                    <form method="POST" enctype="multipart/form-data">
                         <div class="mb-3">
                             <label class="form-label small fw-bold text-secondary">Vatandaş Adı Soyadı / Hane:</label>
                             <input type="text" class="form-control" name="ad_soyad" placeholder="Örn: Ahmet Yılmaz" required>
@@ -173,11 +176,19 @@ HTML_TEMPLATE = """
                             <label class="form-label small fw-bold text-secondary">Hane Kişi Sayısı:</label>
                             <input type="number" class="form-control" name="kisi_sayisi" value="3" required>
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label small fw-bold text-secondary">Saha İnceleme Rapor Metni:</label>
-                            <textarea class="form-control" name="rapor_metni" rows="5" placeholder="Örn: Hane reisi asgari ücret almaktadır. Aylık 5000 TL kira ödemektedir. Evde 3 kişi yaşamaktadır." required></textarea>
+                        
+                        <div class="mb-3 p-3 border rounded bg-light">
+                            <label class="form-label small fw-bold text-dark">📷 Rapor Kağıdı Fotoğrafı Çek / Yükle (İsteğe Bağlı):</label>
+                            <input type="file" class="form-control" name="rapor_dosyasi" accept="image/*" capture="environment">
+                            <div class="form-text small text-muted">Bilgisayar çıktısı raporun fotoğrafını yüklerseniz sistem otomatik okur.</div>
                         </div>
-                        <button type="submit" name="action" value="evaluate" class="btn btn-primary-custom w-100 py-2 fw-bold text-white mb-2">🔍 Hesapla ve Değerlendir</button>
+
+                        <div class="mb-3">
+                            <label class="form-label small fw-bold text-secondary">Veya Manuel Rapor Metni Yazın / Düzenleyin:</label>
+                            <textarea class="form-control" name="rapor_metni" rows="4" placeholder="İsterseniz metni buraya da yazabilir veya fotoğraftan okunan metni buradan kontrol edebilirsiniz..."></textarea>
+                        </div>
+
+                        <button type="submit" name="action" value="evaluate" class="btn btn-primary-custom w-100 py-2 fw-bold text-white mb-2">🔍 Analiz Et ve Hesapla</button>
                     </form>
                 </div>
 
@@ -230,16 +241,31 @@ HTML_TEMPLATE = """
 """
 
 @app.route("/", methods=["GET", "POST"])
-let_index_pass = True # placeholder
-
-@app.route("/", methods=["GET", "POST"])
 def index():
     result = None
     saved = False
     if request.method == "POST":
         action = request.form.get("action")
         if action == "evaluate":
-            result = evaluate_and_calculate(request.form)
+            rapor_metni = ""
+            
+            # Fotoğraf/Dosya yüklenmiş mi kontrol et
+            file = request.files.get('rapor_dosyasi')
+            if file and file.filename != '':
+                try:
+                    img = Image.open(file.stream)
+                    # OCR ile görselden metni oku (Türkçe destekli)
+                    extracted_text = pytesseract.image_to_string(img, lang='tur')
+                    rapor_metni = extracted_text
+                except Exception as e:
+                    print("OCR Okuma Hatası:", e)
+            
+            # Eğer fotoğraf yüklenmemişse veya OCR boş döndüyse manuel yazılan metni al
+            if not rapor_metni.strip():
+                rapor_metni = request.form.get('rapor_metni', '')
+
+            result = evaluate_and_calculate(request.form, rapor_metni)
+
         elif action == "save":
             payload = {
                 "ad_soyad": request.form.get("ad_soyad"),
