@@ -4,49 +4,58 @@ import re
 
 app = Flask(__name__)
 
-# ⚠️ AZ ÖNCE KOPYALADIĞIN GOOGLE SCRIPT URL'SİNİ BURAYA YAPIŞTIR:
-GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxcQp4qqdHVACKCjglcTZy65R-8O2CnFwc7yv5qOolZvWQsncy8j--YcoJRoAnQkyWk/exec"
+# Google Apps Script Web App URL'in (Aynı kalacak)
+GOOGLE_SCRIPT_URL = "BURAYA_GOOGLE_APPS_SCRIPT_URL_ADRESINI_YAPISTIR"
 
 def evaluate_and_calculate(data):
     ad_soyad = data.get('ad_soyad', 'Belirtilmemiş')
     rapor_metni = str(data.get('rapor_metni', '')).lower()
     
     try:
-        kisi_sayisi = int(data.get('kisi_sayisi', 1))
+        kisi_sayisi = int(data.get('kisi_sayisi', 3))
     except:
-        kisi_sayisi = 1
+        kisi_sayisi = 3
 
-    # --- KİRA TUTARI AYIKLAMA ---
+    # --- 1. KİRA TUTARI TESPİTİ (Gelişmiş Tarama) ---
     kira_tutari_str = "Belirtilmemiş"
+    kira_val = 0.0
+    
+    # Metin içinde geçen kira bedellerini yakala
     rent_matches = re.findall(r'(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)[^\.\n]*kira', rapor_metni)
     if not rent_matches:
         rent_matches = re.findall(r'kira[^\.\n]*?(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)', rapor_metni)
+    if not rent_matches:
+        # Alternatif genel sayı + kira kelimesi yakalama
+        rent_matches = re.findall(r'kira[^\d]*(\d+(?:[.,]\d+)?)', rapor_metni)
+
     if rent_matches:
         try:
-            kira_val = float(rent_matches[0].replace('.', '').replace(',', '.'))
-            if kira_val > 0:
-                kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
+            clean_kira = str(rent_matches[0]).replace('.', '').replace(',', '.')
+            kira_val = float(clean_kira)
         except:
             pass
 
-    # --- SABİT YARDIM VE BORÇ/KİRA SÜZGECİ ---
+    if kira_val > 0:
+        kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
+
+    # --- 2. HANE GELİRİ VE SABİT YARDIMLAR ---
     sentences = re.split(r'[\.\!\?\;]+', rapor_metni)
     total_income = 0.0
     income_found = False
 
-    forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları', 'kira', 'kiralık']
+    forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları']
 
     for sent in sentences:
         sent = sent.strip()
         if not sent:
             continue
 
-        # Borç veya kira geçen cümleleri gelirden tamamen çıkar
+        # Borç geçen cümleleri gelirden tamamen çıkar (Kira artık gelir hesabını bozmaz)
         has_forbidden = any(fw in sent for fw in forbidden_words)
         if has_forbidden:
             continue
 
-        # Belirttiğin güncel taban yardım tutarları
+        # Sabit Tanımlı Yardım ve Maaş Kalemleri
         if 'asgari ücret' in sent:
             total_income += 28075.0
             income_found = True
@@ -72,7 +81,7 @@ def evaluate_and_calculate(data):
             total_income += 11000.0
             income_found = True
 
-        # Serbest TL gelirleri (500 TL üzeri)
+        # Serbest TL gelirleri (500 TL üzeri - kira hariç diğer gelirler)
         money_matches = re.findall(r'([\d\.,]+)\s*(?:tl|lira|₺)', sent)
         for m in money_matches:
             try:
@@ -85,13 +94,26 @@ def evaluate_and_calculate(data):
             except:
                 pass
 
+    # Eğer metinden hiçbir gelir kalemi yakalanamadıysa ama metinde geçen genel rakamlar varsa onları tara
+    if not income_found:
+        all_money = re.findall(r'(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)', rapor_metni)
+        for m in all_money:
+            try:
+                val = float(m.replace('.', '').replace(',', '.'))
+                # Eğer rakam kira miktarından farklıysa ve makul bir gelirse ekle
+                if val > 500 and val != kira_val:
+                    total_income += val
+                    income_found = True
+            except:
+                pass
+
     hane_geliri_str = f"{total_income:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if total_income > 0 else "0,00 TL"
     
     per_capita = total_income / kisi_sayisi if kisi_sayisi > 0 else 0.0
     kisi_basi_gelir_str = f"{per_capita:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
 
-    # --- KRİTERLER (SOSYAL MARKET & GIDA) ---
-    is_definitely_tenant = any(kw in rapor_metni for kw in ['kiracı', 'kira öder', 'kira ödüyor', 'ev sahibi değil'])
+    # --- 3. KRİTERLER (SOSYAL MARKET & GIDA) ---
+    is_definitely_tenant = any(kw in rapor_metni for kw in ['kiracı', 'kira öder', 'kira ödüyor', 'ev sahibi değil']) or (kira_val > 0)
     is_ev_sahibi = False
     if not is_definitely_tenant:
         if 'ev sahibi' in rapor_metni or 'mülk var' in rapor_metni:
@@ -108,7 +130,7 @@ def evaluate_and_calculate(data):
 
     income_exceeded = 'gelir sınırı aşıldı' in rapor_metni
 
-    # Sosyal Market
+    # Sosyal Market Kararı
     sm_reasons = []
     if is_ev_sahibi: sm_reasons.append("Ev Sahibi / Kira Ödemiyor")
     if has_car: sm_reasons.append("Araç Bulundu")
@@ -116,7 +138,7 @@ def evaluate_and_calculate(data):
 
     sosyal_market = "Uygun Değil" if sm_reasons else "Uygun"
 
-    # Gıda Desteği
+    # Gıda Desteği Kararı
     gida_reasons = []
     if income_exceeded: gida_reasons.append("Gelir Sınırı Aşıldı")
     if has_car and not has_old_car: gida_reasons.append("Model Yılı 2015 Üzeri Araç")
@@ -155,7 +177,7 @@ HTML_TEMPLATE = """
     <nav class="navbar navbar-custom py-3 px-4 shadow-sm">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1 fw-bold text-info">🏛️ BAĞCILAR BELEDİYESİ</span>
-            <span class="text-white-50 small">Mobil Saha Sistemi v5.3</span>
+            <span class="text-white-50 small">Mobil Saha Sistemi v5.4</span>
         </div>
     </nav>
 
@@ -175,7 +197,7 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="mb-3">
                             <label class="form-label small fw-bold text-secondary">Saha İnceleme Rapor Metni:</label>
-                            <textarea class="form-control" name="rapor_metni" rows="4" placeholder="Rapor metnini buraya yapıştırın (Maaş, kira, borç, araç detayları vb.)..." required></textarea>
+                            <textarea class="form-control" name="rapor_metni" rows="5" placeholder="Örn: Hane reisi asgari ücret almaktadır. Aylık 5000 TL kira ödemektedir. Evde 3 kişi yaşamaktadır." required></textarea>
                         </div>
                         <button type="submit" name="action" value="evaluate" class="btn btn-primary-custom w-100 py-2 fw-bold text-white mb-2">🔍 Hesapla ve Değerlendir</button>
                     </form>
@@ -204,7 +226,6 @@ HTML_TEMPLATE = """
                         </li>
                     </ul>
 
-                    <!-- Google E-Tablolara Kaydet Formu -->
                     <form method="POST">
                         <input type="hidden" name="ad_soyad" value="{{ result.ad_soyad }}">
                         <input type="hidden" name="kisi_sayisi" value="{{ result.kisi_sayisi }}">
