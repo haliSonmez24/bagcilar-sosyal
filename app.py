@@ -16,16 +16,14 @@ def evaluate_and_calculate(data):
     except:
         kisi_sayisi = 3
 
-    # --- 1. KİRA TUTARI TESPİTİ (Gelişmiş Tarama) ---
+    # --- 1. KİRA TUTARI (Kira kelimesinin yanındaki rakam - Gelire ASLA eklenmez) ---
     kira_tutari_str = "Belirtilmemiş"
     kira_val = 0.0
     
-    # Metin içinde geçen kira bedellerini yakala
     rent_matches = re.findall(r'(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)[^\.\n]*kira', rapor_metni)
     if not rent_matches:
         rent_matches = re.findall(r'kira[^\.\n]*?(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)', rapor_metni)
     if not rent_matches:
-        # Alternatif genel sayı + kira kelimesi yakalama
         rent_matches = re.findall(r'kira[^\d]*(\d+(?:[.,]\d+)?)', rapor_metni)
 
     if rent_matches:
@@ -38,10 +36,9 @@ def evaluate_and_calculate(data):
     if kira_val > 0:
         kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
 
-    # --- 2. HANE GELİRİ VE SABİT YARDIMLAR ---
+    # --- 2. HANE GELİRİ HESABI (Yardımlar + Maaşlar) ---
     sentences = re.split(r'[\.\!\?\;]+', rapor_metni)
     total_income = 0.0
-    income_found = False
 
     forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları']
 
@@ -50,60 +47,43 @@ def evaluate_and_calculate(data):
         if not sent:
             continue
 
-        # Borç geçen cümleleri gelirden tamamen çıkar (Kira artık gelir hesabını bozmaz)
-        has_forbidden = any(fw in sent for fw in forbidden_words)
-        if has_forbidden:
+        # Borç geçen cümleleri tamamen atla
+        if any(fw in sent for fw in forbidden_words):
             continue
 
-        # Sabit Tanımlı Yardım ve Maaş Kalemleri
+        # Eğer bu cümle bir kira cümlesiyse, gelir hesabına katma!
+        if 'kira' in sent:
+            continue
+
+        # Sabit Yardımlar (Senin belirttiğin tutarlar)
         if 'asgari ücret' in sent:
             total_income += 28075.0
-            income_found = True
         if 'yaşlılık' in sent or 'yaşlı aylığı' in sent:
             total_income += 7257.0
-            income_found = True
         if 'emekli' in sent or 'emekli aylığı' in sent:
             total_income += 23552.0
-            income_found = True
         if 'ölüm aylığı' in sent:
             total_income += 14650.0
-            income_found = True
         if 'yetim aylığı' in sent or 'yetim maaşı' in sent:
             total_income += 5800.0
-            income_found = True
         if 'engelli yakını' in sent:
             total_income += 5793.0
-            income_found = True
         elif 'engelli' in sent:
             total_income += 7250.0
-            income_found = True
+        if 'evde bakım' in sent or 'evde bakım aylığı' in sent:
+            total_income += 7250.0 # İhtiyaca göre güncellenebilir
         if 'sed' in sent:
             total_income += 11000.0
-            income_found = True
 
-        # Serbest TL gelirleri (500 TL üzeri - kira hariç diğer gelirler)
+        # "Maaş", "gelir", "aylık" geçen cümlelerdeki serbest rakamları hane gelirine ekle
         money_matches = re.findall(r'([\d\.,]+)\s*(?:tl|lira|₺)', sent)
         for m in money_matches:
             try:
                 val = float(m.replace('.', '').replace(',', '.'))
-                income_keywords = ['gelir', 'maaş', 'aylık', 'yardım', 'destek', 'emekli', 'yevmiye', 'ödenen', 'aldığı']
+                income_keywords = ['gelir', 'maaş', 'aylık', 'yardım', 'destek', 'yevmiye', 'ödenen', 'aldığı']
                 if any(kw in sent for kw in income_keywords) and val > 500:
                     if val not in [28075.0, 7257.0, 23552.0, 14650.0, 5800.0, 7250.0, 5793.0, 11000.0]:
                         total_income += val
-                        income_found = True
-            except:
-                pass
-
-    # Eğer metinden hiçbir gelir kalemi yakalanamadıysa ama metinde geçen genel rakamlar varsa onları tara
-    if not income_found:
-        all_money = re.findall(r'(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)', rapor_metni)
-        for m in all_money:
-            try:
-                val = float(m.replace('.', '').replace(',', '.'))
-                # Eğer rakam kira miktarından farklıysa ve makul bir gelirse ekle
-                if val > 500 and val != kira_val:
-                    total_income += val
-                    income_found = True
             except:
                 pass
 
@@ -130,19 +110,17 @@ def evaluate_and_calculate(data):
 
     income_exceeded = 'gelir sınırı aşıldı' in rapor_metni
 
-    # Sosyal Market Kararı
+    # Sosyal Market
     sm_reasons = []
     if is_ev_sahibi: sm_reasons.append("Ev Sahibi / Kira Ödemiyor")
     if has_car: sm_reasons.append("Araç Bulundu")
     if income_exceeded: sm_reasons.append("Gelir Sınırı Aşıldı")
-
     sosyal_market = "Uygun Değil" if sm_reasons else "Uygun"
 
-    # Gıda Desteği Kararı
+    # Gıda Desteği
     gida_reasons = []
     if income_exceeded: gida_reasons.append("Gelir Sınırı Aşıldı")
     if has_car and not has_old_car: gida_reasons.append("Model Yılı 2015 Üzeri Araç")
-
     gida = "Uygun Değil" if gida_reasons else "Uygun"
 
     return {
@@ -177,7 +155,7 @@ HTML_TEMPLATE = """
     <nav class="navbar navbar-custom py-3 px-4 shadow-sm">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1 fw-bold text-info">🏛️ BAĞCILAR BELEDİYESİ</span>
-            <span class="text-white-50 small">Mobil Saha Sistemi v5.4</span>
+            <span class="text-white-50 small">Mobil Saha Sistemi v5.5</span>
         </div>
     </nav>
 
@@ -250,6 +228,9 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
+
+@app.route("/", methods=["GET", "POST"])
+let_index_pass = True # placeholder
 
 @app.route("/", methods=["GET", "POST"])
 def index():
