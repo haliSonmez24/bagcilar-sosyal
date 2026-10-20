@@ -1,7 +1,6 @@
 from flask import Flask, render_template_string, request
 import requests
 import re
-import os
 import pytesseract
 from PIL import Image
 
@@ -10,130 +9,133 @@ app = Flask(__name__)
 # Google Apps Script Web App URL'in
 GOOGLE_SCRIPT_URL = "BURAYA_GOOGLE_APPS_SCRIPT_URL_ADRESINI_YAPISTIR"
 
-def evaluate_and_calculate(data, rapor_metni):
-    ad_soyad = data.get('ad_soyad', 'Belirtilmemiş')
-    rapor_metni = str(rapor_metni).lower()
+def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
+    text_lower = extracted_text.lower()
     
-    try:
-        kisi_sayisi = int(data.get('kisi_sayisi', 3))
-    except:
-        kisi_sayisi = 3
-
-    # --- 1. KİRA TUTARI (Kira kelimesinin yanındaki rakam - Gelire ASLA eklenmez) ---
-    kira_tutari_str = "Belirtilmemiş"
-    kira_val = 0.0
+    # --- 1. SAĞ ÜST ALANLARIN OCR İLE NOKTA ATIŞI ÇEKİLMESİ ---
     
-    rent_matches = re.findall(r'(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)[^\.\n]*kira', rapor_metni)
-    if not rent_matches:
-        rent_matches = re.findall(r'kira[^\.\n]*?(\d+(?:[.,]\d+)*)\s*(?:tl|lira|₺)', rapor_metni)
-    if not rent_matches:
-        rent_matches = re.findall(r'kira[^\d]*(\d+(?:[.,]\d+)?)', rapor_metni)
-
-    if rent_matches:
+    # Aile Nüfusu (Hane Kişi Sayısı)
+    kisi_sayisi = manual_kisi_sayisi
+    nufus_match = re.search(r'aile\s+nüfusu[^\d]*(\d+)', text_lower)
+    if not nufus_match:
+        nufus_match = re.search(r'nüfus[^\d]*(\d+)', text_lower)
+    if nufus_match:
         try:
-            clean_kira = str(rent_matches[0]).replace('.', '').replace(',', '.')
-            kira_val = float(clean_kira)
+            kisi_sayisi = int(nufus_match.group(1))
         except:
             pass
 
-    if kira_val > 0:
-        kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
+    # Ev Kirası
+    kira_val = 0.0
+    kira_match = re.search(r'ev\s+kirası[^\d]*([\d\.,]+)', text_lower)
+    if not kira_match:
+        kira_match = re.search(r'kira[^\d]*([\d\.,]+)', text_lower)
+    if kira_match:
+        try:
+            clean_kira = kira_match.group(1).replace('.', '').replace(',', '.')
+            kira_val = float(clean_kira)
+        except:
+            pass
+            
+    kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if kira_val > 0 else "0,00 TL"
 
-    # --- 2. HANE GELİRİ HESABI (Yardımlar + Maaşlar) ---
-    sentences = re.split(r'[\.\!\?\;]+', rapor_metni)
-    total_income = 0.0
+    # Toplam Gelir (Sağ üstten okunan)
+    toplam_gelir_val = 0.0
+    gelir_match = re.search(r'toplam\s+gelir[^\d]*([\d\.,]+)', text_lower)
+    if gelir_match:
+        try:
+            clean_gelir = gelir_match.group(1).replace('.', '').replace(',', '.')
+            toplam_gelir_val = float(clean_gelir)
+        except:
+            pass
 
-    forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları']
+    # Eğer sağ üstte toplam gelir net yazmıyorsa, eski kural setimizle (yardımlar + maaşlar) alt metinden hesaplayalım
+    if toplam_gelir_val == 0.0:
+        sentences = re.split(r'[\.\!\?\;]+', text_lower)
+        forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları']
+        
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent or any(fw in sent for fw in forbidden_words) or 'kira' in sent:
+                continue
+            
+            # Sabit Yardımlar
+            if 'asgari ücret' in sent: toplam_gelir_val += 28075.0
+            if 'yaşlılık' in sent or 'yaşlı aylığı' in sent: toplam_gelir_val += 7257.0
+            if 'emekli' in sent or 'emekli aylığı' in sent: toplam_gelir_val += 23552.0
+            if 'ölüm aylığı' in sent: toplam_gelir_val += 14650.0
+            if 'yetim aylığı' in sent or 'yetim maaşı' in sent: toplam_gelir_val += 5800.0
+            if 'engelli yakını' in sent: toplam_gelir_val += 5793.0
+            elif 'engelli' in sent: toplam_gelir_val += 7250.0
+            if 'evde bakım' in sent: toplam_gelir_val += 7250.0
+            if 'sed' in sent: toplam_gelir_val += 11000.0
 
-    for sent in sentences:
-        sent = sent.strip()
-        if not sent:
-            continue
+            # Serbest Maaş/Gelir Rakamları
+            money_matches = re.findall(r'([\d\.,]+)\s*(?:tl|lira|₺)', sent)
+            for m in money_matches:
+                try:
+                    val = float(m.replace('.', '').replace(',', '.'))
+                    if any(kw in sent for kw in ['gelir', 'maaş', 'aylık', 'yardım', 'destek', 'yevmiye']) and val > 500:
+                        if val not in [28075.0, 7257.0, 23552.0, 14650.0, 5800.0, 7250.0, 5793.0, 11000.0]:
+                            toplam_gelir_val += val
+                except:
+                    pass
 
-        # Borç geçen cümleleri tamamen atla
-        if any(fw in sent for fw in forbidden_words):
-            continue
+    hane_geliri_str = f"{toplam_gelir_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if toplam_gelir_val > 0 else "0,00 TL"
 
-        # Kira cümlesiyse gelir hesabına katma!
-        if 'kira' in sent:
-            continue
+    # Kişi Başı Gelir (Sağ üstte yazıyorsa al, yazmıyorsa kendimiz hesapla)
+    kisi_basi_val = 0.0
+    kisi_basi_match = re.search(r'kişi\s+başına\s+gelir[^\d]*([\d\.,]+)', text_lower)
+    if kisi_basi_match:
+        try:
+            kisi_basi_val = float(kisi_basi_match.group(1).replace('.', '').replace(',', '.'))
+        except:
+            pass
+            
+    if kisi_basi_val == 0.0 and kisi_sayisi > 0:
+        kisi_basi_val = toplam_gelir_val / kisi_sayisi
 
-        # Sabit Yardımlar ve Maaşlar
-        if 'asgari ücret' in sent:
-            total_income += 28075.0
-        if 'yaşlılık' in sent or 'yaşlı aylığı' in sent:
-            total_income += 7257.0
-        if 'emekli' in sent or 'emekli aylığı' in sent:
-            total_income += 23552.0
-        if 'ölüm aylığı' in sent:
-            total_income += 14650.0
-        if 'yetim aylığı' in sent or 'yetim maaşı' in sent:
-            total_income += 5800.0
-        if 'engelli yakını' in sent:
-            total_income += 5793.0
-        elif 'engelli' in sent:
-            total_income += 7250.0
-        if 'evde bakım' in sent or 'evde bakım aylığı' in sent:
-            total_income += 7250.0
-        if 'sed' in sent:
-            total_income += 11000.0
+    kisi_basi_gelir_str = f"{kisi_basi_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
 
-        # "Maaş", "gelir", "aylık" geçen cümlelerdeki serbest rakamları hane gelirine ekle
-        money_matches = re.findall(r'([\d\.,]+)\s*(?:tl|lira|₺)', sent)
-        for m in money_matches:
-            try:
-                val = float(m.replace('.', '').replace(',', '.'))
-                income_keywords = ['gelir', 'maaş', 'aylık', 'yardım', 'destek', 'yevmiye', 'ödenen', 'aldığı']
-                if any(kw in sent for kw in income_keywords) and val > 500:
-                    if val not in [28075.0, 7257.0, 23552.0, 14650.0, 5800.0, 7250.0, 5793.0, 11000.0]:
-                        total_income += val
-            except:
-                pass
-
-    hane_geliri_str = f"{total_income:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if total_income > 0 else "0,00 TL"
-    
-    per_capita = total_income / kisi_sayisi if kisi_sayisi > 0 else 0.0
-    kisi_basi_gelir_str = f"{per_capita:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
-
-    # --- 3. KRİTERLER (SOSYAL MARKET & GIDA) ---
-    is_definitely_tenant = any(kw in rapor_metni for kw in ['kiracı', 'kira öder', 'kira ödüyor', 'ev sahibi değil']) or (kira_val > 0)
+    # --- 2. ALT METİN ANALİZİ (Kriterler: Sosyal Market & Gıda) ---
+    is_definitely_tenant = any(kw in text_lower for kw in ['kiracı', 'kira öder', 'kira ödüyor', 'ev sahibi değil']) or (kira_val > 0)
     is_ev_sahibi = False
     if not is_definitely_tenant:
-        if 'ev sahibi' in rapor_metni or 'mülk var' in rapor_metni:
+        if 'ev sahibi' in text_lower or 'mülk var' in text_lower:
             is_ev_sahibi = True
-        if 'akraba' in rapor_metni and ('kira ödemiyor' in rapor_metni or 'bedelsiz' in rapor_metni):
+        if 'akraba' in text_lower and ('kira ödemiyor' in text_lower or 'bedelsiz' in text_lower):
             is_ev_sahibi = True
 
-    has_car = any(kw in rapor_metni for kw in ['araç', 'otomobil', 'araba', 'motosiklet'])
+    has_car = any(kw in text_lower for kw in ['araç', 'otomobil', 'araba', 'motosiklet'])
     has_old_car = False
-    years_found = re.findall(r'\b(20[0-9]{2}|19[0-9]{2})\b', rapor_metni)
+    years_found = re.findall(r'\b(20[0-9]{2}|19[0-9]{2})\b', text_lower)
     for y in years_found:
         if int(y) <= 2015:
             has_old_car = True
 
-    income_exceeded = 'gelir sınırı aşıldı' in rapor_metni
+    income_exceeded = 'gelir sınırı aşıldı' in text_lower
 
-    # Sosyal Market
+    # Sosyal Market Kararı
     sm_reasons = []
     if is_ev_sahibi: sm_reasons.append("Ev Sahibi / Kira Ödemiyor")
     if has_car: sm_reasons.append("Araç Bulundu")
     if income_exceeded: sm_reasons.append("Gelir Sınırı Aşıldı")
     sosyal_market = "Uygun Değil" if sm_reasons else "Uygun"
 
-    # Gıda Desteği
+    # Gıda Desteği Kararı
     gida_reasons = []
     if income_exceeded: gida_reasons.append("Gelir Sınırı Aşıldı")
     if has_car and not has_old_car: gida_reasons.append("Model Yılı 2015 Üzeri Araç")
     gida = "Uygun Değil" if gida_reasons else "Uygun"
 
     return {
-        "ad_soyad": ad_soyad,
         "kisi_sayisi": str(kisi_sayisi),
         "hane_geliri": hane_geliri_str,
         "kisi_basi_gelir": kisi_basi_gelir_str,
         "sosyal_market": sosyal_market,
         "gida": gida,
-        "kira_tutari": kira_tutari_str
+        "kira_tutari": kira_tutari_str,
+        "okunan_metin": extracted_text
     }
 
 HTML_TEMPLATE = """
@@ -158,7 +160,7 @@ HTML_TEMPLATE = """
     <nav class="navbar navbar-custom py-3 px-4 shadow-sm">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1 fw-bold text-info">🏛️ BAĞCILAR BELEDİYESİ</span>
-            <span class="text-white-50 small">Mobil Saha Sistemi v6.0 (OCR Destekli)</span>
+            <span class="text-white-50 small">Mobil Saha Sistemi v7.0 (Akıllı Form OCR)</span>
         </div>
     </nav>
 
@@ -166,36 +168,34 @@ HTML_TEMPLATE = """
         <div class="row justify-content-center">
             <div class="col-md-8">
                 <div class="card card-custom p-4 mb-4 bg-white">
-                    <h5 class="fw-bold text-primary mb-3">📋 Sosyal İnceleme & Kamera / Belge Analizi</h5>
+                    <h5 class="fw-bold text-primary mb-3">📋 Rapor Kağıdı Fotoğrafı ile Akıllı Analiz</h5>
                     <form method="POST" enctype="multipart/form-data">
                         <div class="mb-3">
-                            <label class="form-label small fw-bold text-secondary">Vatandaş Adı Soyadı / Hane:</label>
+                            <label class="form-label small fw-bold text-secondary">Vatandaş Adı Soyadı:</label>
                             <input type="text" class="form-control" name="ad_soyad" placeholder="Örn: Ahmet Yılmaz" required>
                         </div>
                         <div class="mb-3">
-                            <label class="form-label small fw-bold text-secondary">Hane Kişi Sayısı:</label>
+                            <label class="form-label small fw-bold text-secondary">Varsayılan Nüfus (Fotoğraftan okunamazsa kullanılır):</label>
                             <input type="number" class="form-control" name="kisi_sayisi" value="3" required>
                         </div>
                         
                         <div class="mb-3 p-3 border rounded bg-light">
-                            <label class="form-label small fw-bold text-dark">📷 Rapor Kağıdı Fotoğrafı Çek / Yükle (İsteğe Bağlı):</label>
-                            <input type="file" class="form-control" name="rapor_dosyasi" accept="image/*" capture="environment">
-                            <div class="form-text small text-muted">Bilgisayar çıktısı raporun fotoğrafını yüklerseniz sistem otomatik okur.</div>
+                            <label class="form-label small fw-bold text-dark">📷 Rapor Kağıdı Fotoğrafı (Sağ üst ve alt metin içeren form):</label>
+                            <input type="file" class="form-control" name="rapor_dosyasi" accept="image/*" capture="environment" required>
+                            <div class="form-text small text-muted">Sağ üstteki nüfus, kira ve gelir bilgilerini, alttaki rapor metnini otomatik ayrıştırır.</div>
                         </div>
 
-                        <div class="mb-3">
-                            <label class="form-label small fw-bold text-secondary">Veya Manuel Rapor Metni Yazın / Düzenleyin:</label>
-                            <textarea class="form-control" name="rapor_metni" rows="4" placeholder="İsterseniz metni buraya da yazabilir veya fotoğraftan okunan metni buradan kontrol edebilirsiniz..."></textarea>
-                        </div>
-
-                        <button type="submit" name="action" value="evaluate" class="btn btn-primary-custom w-100 py-2 fw-bold text-white mb-2">🔍 Analiz Et ve Hesapla</button>
+                        <button type="submit" name="action" value="evaluate" class="btn btn-primary-custom w-100 py-2 fw-bold text-white mb-2">🔍 Formu Tara ve Değerlendir</button>
                     </form>
                 </div>
 
                 {% if result %}
                 <div class="card card-custom p-4 bg-white border-start border-4 border-info">
-                    <h5 class="fw-bold text-dark mb-3">📊 Analiz Sonuçları</h5>
+                    <h5 class="fw-bold text-dark mb-3">📊 Akıllı Analiz Sonuçları</h5>
                     <ul class="list-group list-group-flush mb-3">
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            <strong>Tespit Edilen Nüfus:</strong> <span class="badge bg-secondary fs-6">{{ result.kisi_sayisi }} Kişi</span>
+                        </li>
                         <li class="list-group-item d-flex justify-content-between align-items-center">
                             <strong>Toplam Hane Geliri:</strong> <span class="badge bg-secondary fs-6">{{ result.hane_geliri }}</span>
                         </li>
@@ -203,7 +203,7 @@ HTML_TEMPLATE = """
                             <strong>Kişi Başı Gelir:</strong> <span class="badge bg-secondary fs-6">{{ result.kisi_basi_gelir }}</span>
                         </li>
                         <li class="list-group-item d-flex justify-content-between align-items-center">
-                            <strong>Kira Tutarı:</strong> <span class="badge bg-secondary fs-6">{{ result.kira_tutari }}</span>
+                            <strong>Ev Kirası:</strong> <span class="badge bg-secondary fs-6">{{ result.kira_tutari }}</span>
                         </li>
                         <li class="list-group-item d-flex justify-content-between align-items-center">
                             <strong>Sosyal Market:</strong> 
@@ -214,6 +214,11 @@ HTML_TEMPLATE = """
                             <span class="badge {% if result.gida == 'Uygun' %}badge-uygun{% else %}badge-degil{% endif %} fs-6">{{ result.gida }}</span>
                         </li>
                     </ul>
+
+                    <details class="mb-3 text-muted small">
+                        <summary class="fw-bold cursor-pointer">📄 OCR Tarafından Okunan Ham Metni Gör</summary>
+                        <p class="p-2 bg-light border rounded mt-2" style="white-space: pre-wrap;">{{ result.okunan_metin }}</p>
+                    </details>
 
                     <form method="POST">
                         <input type="hidden" name="ad_soyad" value="{{ result.ad_soyad }}">
@@ -247,24 +252,24 @@ def index():
     if request.method == "POST":
         action = request.form.get("action")
         if action == "evaluate":
-            rapor_metni = ""
-            
-            # Fotoğraf/Dosya yüklenmiş mi kontrol et
+            ad_soyad = request.form.get("ad_soyad", "Belirtilmemiş")
+            try:
+                manual_kisi = int(request.form.get("kisi_sayisi", 3))
+            except:
+                manual_kisi = 3
+
             file = request.files.get('rapor_dosyasi')
+            extracted_text = ""
             if file and file.filename != '':
                 try:
                     img = Image.open(file.stream)
-                    # OCR ile görselden metni oku (Türkçe destekli)
                     extracted_text = pytesseract.image_to_string(img, lang='tur')
-                    rapor_metni = extracted_text
                 except Exception as e:
-                    print("OCR Okuma Hatası:", e)
-            
-            # Eğer fotoğraf yüklenmemişse veya OCR boş döndüyse manuel yazılan metni al
-            if not rapor_metni.strip():
-                rapor_metni = request.form.get('rapor_metni', '')
+                    print("OCR Hatası:", e)
 
-            result = evaluate_and_calculate(request.form, rapor_metni)
+            res = evaluate_and_calculate_from_ocr(extracted_text, manual_kisi)
+            res["ad_soyad"] = ad_soyad
+            result = res
 
         elif action == "save":
             payload = {
