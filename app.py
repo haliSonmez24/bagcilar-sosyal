@@ -12,24 +12,20 @@ GOOGLE_SCRIPT_URL = "BURAYA_GOOGLE_APPS_SCRIPT_URL_ADRESINI_YAPISTIR"
 def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
     text_lower = extracted_text.lower()
     
-    # --- 1. SAĞ ÜST ALANLARIN OCR İLE NOKTA ATIŞI ÇEKİLMESİ ---
+    # --- 1. SAĞ ÜST ALANLARIN OCR İLE ESNEK VE KUSURSUZ ÇEKİLMESİ ---
     
     # Aile Nüfusu (Hane Kişi Sayısı)
     kisi_sayisi = manual_kisi_sayisi
-    nufus_match = re.search(r'aile\s+nüfusu[^\d]*(\d+)', text_lower)
-    if not nufus_match:
-        nufus_match = re.search(r'nüfus[^\d]*(\d+)', text_lower)
+    nufus_match = re.search(r'(?:aile\s*nüfusu|nüfus)[^\d]*(\d+)', text_lower)
     if nufus_match:
         try:
             kisi_sayisi = int(nufus_match.group(1))
         except:
             pass
 
-    # Ev Kirası
+    # Ev Kirası (Çok esnek tarama: etiket sonrasındaki ilk sayısal değeri yakalar)
     kira_val = 0.0
-    kira_match = re.search(r'ev\s+kirası[^\d]*([\d\.,]+)', text_lower)
-    if not kira_match:
-        kira_match = re.search(r'kira[^\d]*([\d\.,]+)', text_lower)
+    kira_match = re.search(r'(?:ev\s*kirası|kira)[^\d]*([\d\.,]+)', text_lower)
     if kira_match:
         try:
             clean_kira = kira_match.group(1).replace('.', '').replace(',', '.')
@@ -39,9 +35,9 @@ def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
             
     kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if kira_val > 0 else "0,00 TL"
 
-    # Toplam Gelir (Sağ üstten okunan)
+    # Toplam Gelir (Sağ üstten esnek okuma)
     toplam_gelir_val = 0.0
-    gelir_match = re.search(r'toplam\s+gelir[^\d]*([\d\.,]+)', text_lower)
+    gelir_match = re.search(r'(?:toplam\s*gelir|hane\s*geliri)[^\d]*([\d\.,]+)', text_lower)
     if gelir_match:
         try:
             clean_gelir = gelir_match.group(1).replace('.', '').replace(',', '.')
@@ -49,7 +45,7 @@ def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
         except:
             pass
 
-    # Eğer sağ üstte toplam gelir net yazmıyorsa, eski kural setimizle (yardımlar + maaşlar) alt metinden hesaplayalım
+    # Eğer sağ üstte toplam gelir net okunamadıysa alt metinden hesapla
     if toplam_gelir_val == 0.0:
         sentences = re.split(r'[\.\!\?\;]+', text_lower)
         forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları']
@@ -83,9 +79,9 @@ def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
 
     hane_geliri_str = f"{toplam_gelir_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if toplam_gelir_val > 0 else "0,00 TL"
 
-    # Kişi Başı Gelir (Sağ üstte yazıyorsa al, yazmıyorsa kendimiz hesapla)
+    # Kişi Başı Gelir
     kisi_basi_val = 0.0
-    kisi_basi_match = re.search(r'kişi\s+başına\s+gelir[^\d]*([\d\.,]+)', text_lower)
+    kisi_basi_match = re.search(r'(?:kişi\s*başına\s*gelir|kişi\s*başı)[^\d]*([\d\.,]+)', text_lower)
     if kisi_basi_match:
         try:
             kisi_basi_val = float(kisi_basi_match.group(1).replace('.', '').replace(',', '.'))
@@ -160,7 +156,7 @@ HTML_TEMPLATE = """
     <nav class="navbar navbar-custom py-3 px-4 shadow-sm">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1 fw-bold text-info">🏛️ BAĞCILAR BELEDİYESİ</span>
-            <span class="text-white-50 small">Mobil Saha Sistemi v7.0 (Akıllı Form OCR)</span>
+            <span class="text-white-50 small">Mobil Saha Sistemi v7.1 (Akıllı Form OCR)</span>
         </div>
     </nav>
 
