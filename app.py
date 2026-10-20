@@ -9,43 +9,59 @@ app = Flask(__name__)
 # Google Apps Script Web App URL'in
 GOOGLE_SCRIPT_URL = "BURAYA_GOOGLE_APPS_SCRIPT_URL_ADRESINI_YAPISTIR"
 
+def parse_turkish_number(val_str):
+    """Metin içindeki 15.000,00 veya 15000 veya 15,000.00 gibi formatları floata çevirir."""
+    try:
+        # Sadece rakam, virgül ve nokta bırak
+        val_str = re.sub(r'[^\d\.,]', '', val_str)
+        if not val_str:
+            return 0.0
+        # Eğer hem nokta hem virgül varsa (Örn: 15.000,00)
+        if '.' in val_str and ',' in val_str:
+            val_str = val_str.replace('.', '').replace(',', '.')
+        elif ',' in val_str:
+            # Sadece virgül varsa kuruş ayracı kabul et
+            val_str = val_str.replace(',', '.')
+        elif '.' in val_str:
+            # Sadece nokta varsa ve binlik ayracı gibiyse (Örn: 15.000)
+            parts = val_str.split('.')
+            if len(parts[-1]) == 3: # 15.000 tarzı binlik ayracı
+                val_str = val_str.replace('.', '')
+        return float(val_str)
+    except:
+        return 0.0
+
 def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
+    # Metni tamamen küçük harfe çevir ve Türkçe karakter esnekliği sağla
     text_lower = extracted_text.lower()
     
-    # --- 1. SAĞ ÜST ALANLARIN OCR İLE ESNEK VE KUSURSUZ ÇEKİLMESİ ---
-    
-    # Aile Nüfusu (Hane Kişi Sayısı)
+    # --- 1. AİLE NÜFUSU / KİŞİ SAYISI ---
     kisi_sayisi = manual_kisi_sayisi
-    nufus_match = re.search(r'(?:aile\s*nüfusu|nüfus)[^\d]*(\d+)', text_lower)
+    nufus_match = re.search(r'(?:n[uü]fus|aile|ki[sş]i)[^\d]{0,20}(\d+)', text_lower)
     if nufus_match:
         try:
-            kisi_sayisi = int(nufus_match.group(1))
+            val = int(nufus_match.group(1))
+            if 1 <= val <= 20: # Mantıklı bir nüfus sayısıysa
+                kisi_sayisi = val
         except:
             pass
 
-    # Ev Kirası (Çok esnek tarama: etiket sonrasındaki ilk sayısal değeri yakalar)
+    # --- 2. EV KİRASI TESPİTİ ---
     kira_val = 0.0
-    kira_match = re.search(r'(?:ev\s*kirası|kira)[^\d]*([\d\.,]+)', text_lower)
+    # "kira", "ev kirasi", "kirasi" kelimelerinden sonraki ilk sayıyı yakala
+    kira_match = re.search(r'kira[^\d]{0,25}([\d\.,]+)', text_lower)
     if kira_match:
-        try:
-            clean_kira = kira_match.group(1).replace('.', '').replace(',', '.')
-            kira_val = float(clean_kira)
-        except:
-            pass
-            
-    kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if kira_val > 0 else "0,00 TL"
+        kira_val = parse_turkish_number(kira_match.group(1))
 
-    # Toplam Gelir (Sağ üstten esnek okuma)
+    # --- 3. TOPLAM HANE GELİRİ TESPİTİ ---
     toplam_gelir_val = 0.0
-    gelir_match = re.search(r'(?:toplam\s*gelir|hane\s*geliri)[^\d]*([\d\.,]+)', text_lower)
+    
+    # Öncelikle "toplam gelir" veya "hane geliri" etiketinin yanındaki sayıyı ara
+    gelir_match = re.search(r'(?:toplam\s*gelir|hane\s*gelir|geliri)[^\d]{0,25}([\d\.,]+)', text_lower)
     if gelir_match:
-        try:
-            clean_gelir = gelir_match.group(1).replace('.', '').replace(',', '.')
-            toplam_gelir_val = float(clean_gelir)
-        except:
-            pass
+        toplam_gelir_val = parse_turkish_number(gelir_match.group(1))
 
-    # Eğer sağ üstte toplam gelir net okunamadıysa alt metinden hesapla
+    # Eğer "Toplam Gelir" etiketi okunamadıysa, metindeki sabit yardımları ve maaşları topla
     if toplam_gelir_val == 0.0:
         sentences = re.split(r'[\.\!\?\;]+', text_lower)
         forbidden_words = ['borç', 'borcu', 'kredi borcu', 'borçlanma', 'borçları']
@@ -56,44 +72,39 @@ def evaluate_and_calculate_from_ocr(extracted_text, manual_kisi_sayisi):
                 continue
             
             # Sabit Yardımlar
-            if 'asgari ücret' in sent: toplam_gelir_val += 28075.0
-            if 'yaşlılık' in sent or 'yaşlı aylığı' in sent: toplam_gelir_val += 7257.0
-            if 'emekli' in sent or 'emekli aylığı' in sent: toplam_gelir_val += 23552.0
-            if 'ölüm aylığı' in sent: toplam_gelir_val += 14650.0
-            if 'yetim aylığı' in sent or 'yetim maaşı' in sent: toplam_gelir_val += 5800.0
+            if 'asgari' in sent: toplam_gelir_val += 28075.0
+            if 'yaşlılık' in sent or 'yaşlı' in sent: toplam_gelir_val += 7257.0
+            if 'emekli' in sent: toplam_gelir_val += 23552.0
+            if 'ölüm' in sent: toplam_gelir_val += 14650.0
+            if 'yetim' in sent: toplam_gelir_val += 5800.0
             if 'engelli yakını' in sent: toplam_gelir_val += 5793.0
             elif 'engelli' in sent: toplam_gelir_val += 7250.0
-            if 'evde bakım' in sent: toplam_gelir_val += 7250.0
+            if 'evde bakım' in sent or 'bakım' in sent: toplam_gelir_val += 7250.0
             if 'sed' in sent: toplam_gelir_val += 11000.0
 
-            # Serbest Maaş/Gelir Rakamları
+            # Serbest Rakamlar
             money_matches = re.findall(r'([\d\.,]+)\s*(?:tl|lira|₺)', sent)
             for m in money_matches:
-                try:
-                    val = float(m.replace('.', '').replace(',', '.'))
-                    if any(kw in sent for kw in ['gelir', 'maaş', 'aylık', 'yardım', 'destek', 'yevmiye']) and val > 500:
-                        if val not in [28075.0, 7257.0, 23552.0, 14650.0, 5800.0, 7250.0, 5793.0, 11000.0]:
-                            toplam_gelir_val += val
-                except:
-                    pass
+                val = parse_turkish_number(m)
+                if any(kw in sent for kw in ['gelir', 'maaş', 'aylık', 'yardım', 'destek', 'yevmiye']) and val > 500:
+                    if val not in [28075.0, 7257.0, 23552.0, 14650.0, 5800.0, 7250.0, 5793.0, 11000.0]:
+                        toplam_gelir_val += val
 
-    hane_geliri_str = f"{toplam_gelir_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if toplam_gelir_val > 0 else "0,00 TL"
-
-    # Kişi Başı Gelir
+    # --- 4. KİŞİ BAŞI GELİR TESPİTİ ---
     kisi_basi_val = 0.0
-    kisi_basi_match = re.search(r'(?:kişi\s*başına\s*gelir|kişi\s*başı)[^\d]*([\d\.,]+)', text_lower)
+    kisi_basi_match = re.search(r'ki[sş]i\s*ba[sş][^\d]{0,25}([\d\.,]+)', text_lower)
     if kisi_basi_match:
-        try:
-            kisi_basi_val = float(kisi_basi_match.group(1).replace('.', '').replace(',', '.'))
-        except:
-            pass
-            
+        kisi_basi_val = parse_turkish_number(kisi_basi_match.group(1))
+
     if kisi_basi_val == 0.0 and kisi_sayisi > 0:
         kisi_basi_val = toplam_gelir_val / kisi_sayisi
 
-    kisi_basi_gelir_str = f"{kisi_basi_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.')
+    # Metin Formatlamaları
+    kira_tutari_str = f"{kira_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if kira_val > 0 else "0,00 TL"
+    hane_geliri_str = f"{toplam_gelir_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if toplam_gelir_val > 0 else "0,00 TL"
+    kisi_basi_gelir_str = f"{kisi_basi_val:,.2f} TL".replace(',', 'X').replace('.', ',').replace('X', '.') if kisi_basi_val > 0 else "0,00 TL"
 
-    # --- 2. ALT METİN ANALİZİ (Kriterler: Sosyal Market & Gıda) ---
+    # --- 5. KRİTERLER VE KARAR MEKANİZMASI ---
     is_definitely_tenant = any(kw in text_lower for kw in ['kiracı', 'kira öder', 'kira ödüyor', 'ev sahibi değil']) or (kira_val > 0)
     is_ev_sahibi = False
     if not is_definitely_tenant:
@@ -156,7 +167,7 @@ HTML_TEMPLATE = """
     <nav class="navbar navbar-custom py-3 px-4 shadow-sm">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1 fw-bold text-info">🏛️ BAĞCILAR BELEDİYESİ</span>
-            <span class="text-white-50 small">Mobil Saha Sistemi v7.1 (Akıllı Form OCR)</span>
+            <span class="text-white-50 small">Mobil Saha Sistemi v7.2 (Gelişmiş Esnek OCR)</span>
         </div>
     </nav>
 
@@ -176,9 +187,9 @@ HTML_TEMPLATE = """
                         </div>
                         
                         <div class="mb-3 p-3 border rounded bg-light">
-                            <label class="form-label small fw-bold text-dark">📷 Rapor Kağıdı Fotoğrafı (Sağ üst ve alt metin içeren form):</label>
+                            <label class="form-label small fw-bold text-dark">📷 Rapor Kağıdı Fotoğrafı:</label>
                             <input type="file" class="form-control" name="rapor_dosyasi" accept="image/*" capture="environment" required>
-                            <div class="form-text small text-muted">Sağ üstteki nüfus, kira ve gelir bilgilerini, alttaki rapor metnini otomatik ayrıştırır.</div>
+                            <div class="form-text small text-muted">Rapor kağıdının net bir fotoğrafını yükleyin.</div>
                         </div>
 
                         <button type="submit" name="action" value="evaluate" class="btn btn-primary-custom w-100 py-2 fw-bold text-white mb-2">🔍 Formu Tara ve Değerlendir</button>
@@ -211,9 +222,9 @@ HTML_TEMPLATE = """
                         </li>
                     </ul>
 
-                    <details class="mb-3 text-muted small">
-                        <summary class="fw-bold cursor-pointer">📄 OCR Tarafından Okunan Ham Metni Gör</summary>
-                        <p class="p-2 bg-light border rounded mt-2" style="white-space: pre-wrap;">{{ result.okunan_metin }}</p>
+                    <details class="mb-3 text-muted small" open>
+                        <summary class="fw-bold cursor-pointer text-primary">📄 OCR Tarafından Okunan Ham Metin (Kontrol İçin)</summary>
+                        <p class="p-2 bg-light border rounded mt-2 text-dark" style="white-space: pre-wrap; max-height: 200px; overflow-y: auto;">{{ result.okunan_metin }}</p>
                     </details>
 
                     <form method="POST">
